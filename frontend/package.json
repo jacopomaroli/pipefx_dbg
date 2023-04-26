@@ -1,0 +1,21 @@
+{
+  "name": "pipefx-dbg-frontend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "serve": "serve -s public"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "eslint": "^8.39.0",
+    "eslint-config-prettier": "^8.8.0",
+    "eslint-config-standard": "^17.0.0",
+    "prettier": "^2.8.8",
+    "serve": "^14.2.0",
+    "stylelint": "^15.6.0",
+    "stylelint-config-standard": "^33.0.0"
+  }
+}

@@ -1,0 +1,8 @@
+Debug
+Release
+x64
+.vs/
+*.raw
+3rdparty/*
+!3rdparty/.gitkeep
+config.cfg
