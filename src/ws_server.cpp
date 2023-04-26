@@ -53,7 +53,6 @@ struct action {
 };
 
 typedef websocketpp::lib::shared_ptr<websocketpp::lib::thread> thread_ptr;
-std::vector<thread_ptr> ts;
 
 // pack struct for wire transmission
 #pragma pack(push, 1)
@@ -85,31 +84,57 @@ public:
     }
 
     ~broadcast_server() {
-        delete conf_str;
-        m_server.stop();
-        is_quit = true;
+        if (is_quit)
+            return;
 
-        for (size_t i = 0; i < ts.size(); i++) {
-            ts[i]->join();
+        is_quit = true;
+        m_action_cond.notify_one();
+        delete conf_str;
+        stop_server();
+        free_streams();
+    }
+
+    void stop_server() {
+        unique_lock<mutex> lock(m_server_init_lock);
+
+        while (!is_initialized)
+        {
+            m_server_init_cond.wait(lock);
         }
+
+        lock.unlock();
+        m_server.stop();
     }
 
     void run(uint16_t port) {
-        // listen on specified port
-        m_server.listen(port);
+        {
+            lock_guard<mutex> guard(m_server_init_lock);
 
-        // Start the server accept loop
-        m_server.start_accept();
+            // listen on specified port
+            m_server.listen(port);
 
-        // Start the ASIO io_service run loop
-        try {
-            m_server.run();
+            // Start the server accept loop
+            m_server.start_accept();
+
+            // std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+
+            is_initialized = true;
         }
-        catch (const std::exception& e) {
-            std::cout << e.what() << std::endl;
+        m_server_init_cond.notify_all();
+
+        if (!is_quit)
+        {
+            // Start the ASIO io_service run loop
+            try
+            {
+                m_server.run();
+            } catch (const std::exception &e)
+            {
+                std::cout << e.what() << std::endl;
+            }
         }
 
-        std::cout << "broadcast_server::run terminated";
+        std::cout << "broadcast_server::run terminated" << std::endl;
     }
 
     void on_open(connection_hdl hdl) {
@@ -195,9 +220,12 @@ public:
         while (!is_quit) {
             unique_lock<mutex> lock(m_action_lock);
 
-            while (m_actions.empty()) {
+            while (m_actions.empty() && !is_quit) {
                 m_action_cond.wait(lock);
             }
+
+            if (is_quit)
+                break;
 
             action a = m_actions.front();
             m_actions.pop();
@@ -231,7 +259,7 @@ public:
             }
         }
 
-        std::cout << "broadcast_server::process_messages terminated";
+        std::cout << "broadcast_server::process_messages terminated" << std::endl;
     }
 
     bool should_reload_config() {
@@ -254,12 +282,27 @@ public:
         streams[stream_id] = stream;
     }
 
+    void free_streams() {
+        for (auto &p : streams)
+        {
+            free_stream(&p.second);
+        } 
+    }
+
+    void free_stream(s_stream *stream) {
+        free(stream->stream_frame_buffer);
+    }
+
     char* conf_str;
     conf_t* conf;
     bool b_should_reload_config = false;
     bool done = false;
     bool needs_data = false;
     bool should_send = false;
+    std::vector<thread_ptr> ts;
+    std::atomic<bool> is_initialized = false;
+    std::atomic<bool> is_quit = false;
+
 private:
     typedef std::set<connection_hdl, std::owner_less<connection_hdl>> con_list;
 
@@ -269,9 +312,10 @@ private:
 
     mutex m_action_lock;
     mutex m_connection_lock;
+    mutex m_server_init_lock;
     condition_variable m_action_cond;
+    condition_variable m_server_init_cond;
 
-    bool is_quit = false;
     con_msg_man_type::ptr manager;
     std::map<unsigned, s_stream> streams;
 };
@@ -280,18 +324,15 @@ void* setup_ws_server() {
     try {
         broadcast_server *server_instance = new broadcast_server;
 
-        // thread t(bind(&broadcast_server::process_messages, server_instance));
-        ts.push_back(websocketpp::lib::make_shared<websocketpp::lib::thread>(&broadcast_server::run, server_instance, 9002));
-        ts.push_back(websocketpp::lib::make_shared<websocketpp::lib::thread>(bind(&broadcast_server::process_messages, server_instance)));
-        // threads.push_back(t);
+        server_instance->ts.push_back(
+            websocketpp::lib::make_shared<websocketpp::lib::thread>(&broadcast_server::run, server_instance, 9002));
 
-        // server_instance->run(9002);
+        server_instance->ts.push_back(
+            websocketpp::lib::make_shared<websocketpp::lib::thread>(bind(&broadcast_server::process_messages, server_instance)));
 
-        // t.join();
-
-        //t.detach();
-        for (size_t i = 0; i < ts.size(); i++) {
-            ts[i]->detach();
+        for (size_t i = 0; i < server_instance->ts.size(); i++)
+        {
+            server_instance->ts[i]->detach();
         }
 
         return server_instance;
@@ -301,6 +342,14 @@ void* setup_ws_server() {
     }
 
     return NULL;
+}
+
+void destroy_ws_server(void *ws_server) {
+    broadcast_server *server_instance = (broadcast_server *)ws_server;
+    if (!server_instance || server_instance->is_quit)
+        return;
+    delete server_instance;
+    ws_server = NULL;
 }
 
 #define CONFIG_LINE_BUF_SIZE (256)
@@ -338,12 +387,18 @@ void get_config(char* config_file_path, char* config)
 }
 
 int ws_server_done(void* ws_server) {
-    broadcast_server* server_instance = (broadcast_server*)ws_server;
+    broadcast_server *server_instance = (broadcast_server *)ws_server;
+    if (!server_instance || server_instance->is_quit)
+        return -1;
+
     return (server_instance->done) ? 1 : 0;
 }
 
 int maybe_reload_config(void* ws_server) {
-    broadcast_server* server_instance = (broadcast_server*)ws_server;
+    broadcast_server *server_instance = (broadcast_server *)ws_server;
+    if (!server_instance || server_instance->is_quit)
+        return -1;
+
     if (server_instance->should_reload_config())
     {
         ws_server_update_config(ws_server);
@@ -354,7 +409,9 @@ int maybe_reload_config(void* ws_server) {
 }
 
 void ws_server_send(void* buffer, size_t len, void* ws_server, unsigned stream_id) {
-    broadcast_server* server_instance = (broadcast_server*)ws_server;
+    broadcast_server *server_instance = (broadcast_server *)ws_server;
+    if (!server_instance || server_instance->is_quit)
+        return;
 
     if (server_instance->done) { // first packet
         if (server_instance->needs_data) {
@@ -369,7 +426,9 @@ void ws_server_send(void* buffer, size_t len, void* ws_server, unsigned stream_i
 }
 
 void ws_server_send_done(void* ws_server) {
-    broadcast_server* server_instance = (broadcast_server*)ws_server;
+    broadcast_server *server_instance = (broadcast_server *)ws_server;
+    if (!server_instance || server_instance->is_quit)
+        return;
 
     server_instance->done = true;
     if (server_instance->should_send) {
@@ -383,7 +442,10 @@ void ws_server_send_done(void* ws_server) {
 }
 
 void ws_server_load_config(void* ws_server, char* config_file_path, conf_t* conf) {
-    broadcast_server* server_instance = (broadcast_server*)ws_server;
+    broadcast_server *server_instance = (broadcast_server *)ws_server;
+    if (!server_instance || server_instance->is_quit)
+        return;
+
     char* conf_str = new char[CONFIG_SIZE];
     conf_str[0] = 0;
     get_config(config_file_path, conf_str);
@@ -393,12 +455,18 @@ void ws_server_load_config(void* ws_server, char* config_file_path, conf_t* conf
 }
 
 int ws_server_should_reload_config(void* ws_server) {
-    broadcast_server* server_instance = (broadcast_server*)ws_server;
+    broadcast_server *server_instance = (broadcast_server *)ws_server;
+    if (!server_instance || server_instance->is_quit)
+        return -1;
+
     return (server_instance->should_reload_config())? 1 : 0;
 }
 
 void ws_server_update_config(void* ws_server) {
-    broadcast_server* server_instance = (broadcast_server*)ws_server;
+    broadcast_server *server_instance = (broadcast_server *)ws_server;
+    if (!server_instance || server_instance->is_quit)
+        return;
+
     fx_chain_free(server_instance->conf->chain);
     int line_number = 0;
 
@@ -419,6 +487,9 @@ void ws_server_update_config(void* ws_server) {
 }
 
 void ws_server_push_stream(void* ws_server, unsigned stream_id, unsigned channels, unsigned frame_size, const char* label) {
-    broadcast_server* server_instance = (broadcast_server*)ws_server;
+    broadcast_server *server_instance = (broadcast_server *)ws_server;
+    if (!server_instance || server_instance->is_quit)
+        return;
+
     server_instance->push_stream(stream_id, channels, frame_size, label);
 }

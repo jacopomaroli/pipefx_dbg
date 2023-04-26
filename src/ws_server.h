@@ -8,6 +8,11 @@ extern "C"
 #ifdef __cplusplus
 extern "C"
 #endif
+    void destroy_ws_server(void *ws_server);
+
+#ifdef __cplusplus
+extern "C"
+#endif
 	int ws_server_done(void* ws_server);
 
 #ifdef __cplusplus

@@ -104,6 +104,7 @@ int fifo_write(void *buf, size_t frames)
             end_of_input = 0;
             ws_server_send_done(ws_server);
         }
+        // destroy_ws_server(ws_server); // Just for testing
     }
     else {
         fwrite(buf, sizeof(int16_t), frames * in_channels, out_fifo_fd);
